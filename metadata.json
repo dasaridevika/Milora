@@ -1,0 +1,6 @@
+{
+  "name": "Milora",
+  "description": "A milk vendor delivery and billing app with dual roles for owner and customers.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
