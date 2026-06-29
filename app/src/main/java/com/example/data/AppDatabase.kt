@@ -36,7 +36,7 @@ interface MilkDao {
     suspend fun getDeliveryByCustomerAndDate(customerId: Int, dateStr: String): DailyDeliveryEntity?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertDailyDelivery(delivery: DailyDeliveryEntity)
+    suspend fun insertDailyDelivery(delivery: DailyDeliveryEntity): Long
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertDailyDeliveries(deliveries: List<DailyDeliveryEntity>)
@@ -74,7 +74,7 @@ interface MilkDao {
     suspend fun getQuantityRequestById(id: Int): QuantityChangeRequestEntity?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertQuantityRequest(request: QuantityChangeRequestEntity)
+    suspend fun insertQuantityRequest(request: QuantityChangeRequestEntity): Long
 
     @Update
     suspend fun updateQuantityRequest(request: QuantityChangeRequestEntity)
@@ -84,7 +84,7 @@ interface MilkDao {
     fun getAllNotifications(): Flow<List<NotificationEntity>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertNotification(notification: NotificationEntity)
+    suspend fun insertNotification(notification: NotificationEntity): Long
 
     @Update
     suspend fun updateNotification(notification: NotificationEntity)

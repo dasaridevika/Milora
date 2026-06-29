@@ -8,6 +8,7 @@ data class CustomerEntity(
     @PrimaryKey(autoGenerate = true) val id: Int = 0,
     val name: String,
     val phone: String,
+    val email: String = "", // Google login or profile recovery email
     val address: String,
     val defaultQuantity: Double, // in liters, e.g. 0.5, 1.0, 1.5, 2.0
     val pricePerLiter: Double = 60.0, // default price in Rupees

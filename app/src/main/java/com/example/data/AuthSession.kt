@@ -50,6 +50,7 @@ object AuthSession {
             apply()
         }
         currentUser = GoogleUserProfile(email, name)
+        FirestoreSync.syncUser(context, currentUser, userRole, ownerCode, joinedOwnerCode, currentCustomerId)
     }
 
     fun selectRole(context: Context, role: UserRole) {
@@ -65,6 +66,7 @@ object AuthSession {
 
         prefs.edit().putString("user_role", role.name).apply()
         userRole = role
+        FirestoreSync.syncUser(context, currentUser, userRole, ownerCode, joinedOwnerCode, currentCustomerId)
     }
 
     fun joinOwner(context: Context, code: String, mappedCustomerId: Int) {
@@ -76,9 +78,14 @@ object AuthSession {
         }
         joinedOwnerCode = code
         currentCustomerId = mappedCustomerId
+        FirestoreSync.syncUser(context, currentUser, userRole, ownerCode, joinedOwnerCode, currentCustomerId)
     }
 
     fun logout(context: Context) {
+        currentUser?.email?.let { email ->
+            FirestoreSync.logoutUser(context, email)
+        }
+
         val prefs = context.applicationContext.getSharedPreferences("auth_session", Context.MODE_PRIVATE)
         prefs.edit().clear().apply()
         

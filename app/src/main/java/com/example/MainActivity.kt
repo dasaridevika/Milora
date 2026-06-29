@@ -60,7 +60,7 @@ class MainActivity : ComponentActivity() {
 
         // Setup Room Database, Repository and ViewModel Factory
         val database = AppDatabase.getDatabase(this)
-        val repository = MilkRepository(database.milkDao())
+        val repository = MilkRepository(database.milkDao(), applicationContext)
         val factory = MilkViewModelFactory(repository)
         val viewModel = ViewModelProvider(this, factory)[MilkViewModel::class.java]
 
@@ -101,24 +101,63 @@ fun AppNavigation(viewModel: MilkViewModel) {
     val role = AuthSession.userRole
     val joinedCode = AuthSession.joinedOwnerCode
     val customerId = AuthSession.currentCustomerId
+    val customers by viewModel.customers.collectAsStateWithLifecycle()
 
-    LaunchedEffect(user, role, joinedCode, customerId) {
+    var isCheckingFirestore by remember { mutableStateOf(false) }
+
+    LaunchedEffect(user, role, joinedCode, customerId, customers) {
         if (user != null) {
-            when (role) {
-                UserRole.OWNER -> {
-                    viewModel.activeRole.value = "OWNER"
-                }
-                UserRole.CUSTOMER -> {
-                    if (joinedCode.isNotEmpty() && customerId != -1) {
-                        viewModel.activeCustomerId.value = customerId
+            isCheckingFirestore = true
+            viewModel.fetchUserProfile(user.email) { fRole, fOwnerCode, fJoinedOwnerCode, fCustomerIdVal ->
+                if (fRole != null) {
+                    val mappedRole = when (fRole) {
+                        "OWNER" -> UserRole.OWNER
+                        "CUSTOMER" -> UserRole.CUSTOMER
+                        else -> UserRole.NONE
+                    }
+                    if (mappedRole != AuthSession.userRole) {
+                        AuthSession.selectRole(context, mappedRole)
+                    }
+                    if (mappedRole == UserRole.CUSTOMER && fJoinedOwnerCode != null && fCustomerIdVal != null) {
+                        if (AuthSession.joinedOwnerCode != fJoinedOwnerCode || AuthSession.currentCustomerId != fCustomerIdVal) {
+                            AuthSession.joinOwner(context, fJoinedOwnerCode, fCustomerIdVal)
+                        }
+                        viewModel.activeCustomerId.value = fCustomerIdVal
                         viewModel.activeRole.value = "CUSTOMER"
+                    } else if (mappedRole == UserRole.OWNER) {
+                        viewModel.activeRole.value = "OWNER"
                     } else {
-                        viewModel.activeRole.value = "JOIN_CODE"
+                        viewModel.activeRole.value = "SELECTION"
+                    }
+                } else {
+                    // Fallback if not found in Firestore or offline
+                    val match = customers.find { it.email.isNotEmpty() && it.email.equals(user.email, ignoreCase = true) }
+                    if (match != null && customerId == -1) {
+                        AuthSession.selectRole(context, UserRole.CUSTOMER)
+                        AuthSession.joinOwner(context, "PM-DEV-1234", match.id)
+                        viewModel.activeCustomerId.value = match.id
+                        viewModel.activeRole.value = "CUSTOMER"
+                        Toast.makeText(context, "Welcome back, ${match.name}! Your profile was auto-recovered.", Toast.LENGTH_LONG).show()
+                    } else {
+                        when (role) {
+                            UserRole.OWNER -> {
+                                viewModel.activeRole.value = "OWNER"
+                            }
+                            UserRole.CUSTOMER -> {
+                                if (joinedCode.isNotEmpty() && customerId != -1) {
+                                    viewModel.activeCustomerId.value = customerId
+                                    viewModel.activeRole.value = "CUSTOMER"
+                                } else {
+                                    viewModel.activeRole.value = "JOIN_CODE"
+                                }
+                            }
+                            UserRole.NONE -> {
+                                viewModel.activeRole.value = "SELECTION"
+                            }
+                        }
                     }
                 }
-                UserRole.NONE -> {
-                    viewModel.activeRole.value = "SELECTION"
-                }
+                isCheckingFirestore = false
             }
         } else {
             viewModel.activeRole.value = "SIGN_IN"
@@ -127,38 +166,57 @@ fun AppNavigation(viewModel: MilkViewModel) {
 
     val activeRole by viewModel.activeRole.collectAsStateWithLifecycle()
 
-    AnimatedContent(
-        targetState = activeRole,
-        transitionSpec = {
-            fadeIn() togetherWith fadeOut()
-        },
-        label = "RoleNavigation"
-    ) { currentActive ->
-        when (currentActive) {
-            "SIGN_IN" -> {
-                GoogleSignInScreen(
-                    onSignInSuccess = { email, name ->
-                        AuthSession.loginWithGoogle(context, email, name)
-                    }
+    if (isCheckingFirestore) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.background),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    text = "Syncing Firestore Profile...",
+                    fontSize = 14.sp,
+                    color = MaterialTheme.colorScheme.secondary
                 )
             }
-            "SELECTION" -> {
-                RoleSelectionScreen(viewModel)
-            }
-            "JOIN_CODE" -> {
-                CustomerCodeJoinScreen(
-                    viewModel = viewModel,
-                    onJoined = {
-                        viewModel.activeCustomerId.value = AuthSession.currentCustomerId
-                        viewModel.activeRole.value = "CUSTOMER"
-                    }
-                )
-            }
-            "OWNER" -> {
-                OwnerDashboardScreen(viewModel)
-            }
-            "CUSTOMER" -> {
-                CustomerDashboardScreen(viewModel)
+        }
+    } else {
+        AnimatedContent(
+            targetState = activeRole,
+            transitionSpec = {
+                fadeIn() togetherWith fadeOut()
+            },
+            label = "RoleNavigation"
+        ) { currentActive ->
+            when (currentActive) {
+                "SIGN_IN" -> {
+                    GoogleSignInScreen(
+                        onSignInSuccess = { email, name ->
+                            AuthSession.loginWithGoogle(context, email, name)
+                        }
+                    )
+                }
+                "SELECTION" -> {
+                    RoleSelectionScreen(viewModel)
+                }
+                "JOIN_CODE" -> {
+                    CustomerCodeJoinScreen(
+                        viewModel = viewModel,
+                        onJoined = {
+                            viewModel.activeCustomerId.value = AuthSession.currentCustomerId
+                            viewModel.activeRole.value = "CUSTOMER"
+                        }
+                    )
+                }
+                "OWNER" -> {
+                    OwnerDashboardScreen(viewModel)
+                }
+                "CUSTOMER" -> {
+                    CustomerDashboardScreen(viewModel)
+                }
             }
         }
     }
@@ -556,9 +614,28 @@ fun OwnerDashboardScreen(viewModel: MilkViewModel) {
                     }
                 },
                 actions = {
+                    val context = LocalContext.current
                     var showSettings by remember { mutableStateOf(false) }
+                    var isSyncing by remember { mutableStateOf(false) }
+
                     if (showSettings) {
                         SettingsDialog(onDismiss = { showSettings = false })
+                    }
+                    IconButton(
+                        onClick = {
+                            isSyncing = true
+                            viewModel.syncFromFirestore {
+                                isSyncing = false
+                                Toast.makeText(context, "Synced successfully with Firestore!", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        enabled = !isSyncing
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Sync,
+                            contentDescription = "Sync with Firestore",
+                            tint = if (isSyncing) Color.Gray else MaterialTheme.colorScheme.primary
+                        )
                     }
                     IconButton(onClick = { showSettings = true }) {
                         Icon(
@@ -574,7 +651,6 @@ fun OwnerDashboardScreen(viewModel: MilkViewModel) {
                             tint = MaterialTheme.colorScheme.primary
                         )
                     }
-                    val context = LocalContext.current
                     TextButton(onClick = { AuthSession.logout(context) }) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Default.Logout, contentDescription = "Logout", modifier = Modifier.size(16.dp))
@@ -596,8 +672,8 @@ fun OwnerDashboardScreen(viewModel: MilkViewModel) {
                 NavigationBarItem(
                     selected = ownerTab == "DELIVERIES",
                     onClick = { viewModel.ownerTab.value = "DELIVERIES" },
-                    icon = { Icon(Icons.Default.LocalShipping, contentDescription = "Deliveries") },
-                    label = { Text("Deliveries") }
+                    icon = { Icon(Icons.Default.LocalShipping, contentDescription = "Delivery Management") },
+                    label = { Text("Delivery Management") }
                 )
                 NavigationBarItem(
                     selected = ownerTab == "CUSTOMERS",
@@ -935,9 +1011,9 @@ fun OwnerDeliveriesTab(viewModel: MilkViewModel) {
             .padding(16.dp)
     ) {
         Text(
-            text = "Daily Deliveries Checklist",
+            text = "Delivery Management View",
             fontWeight = FontWeight.Bold,
-            fontSize = 16.sp,
+            fontSize = 18.sp,
             color = MaterialTheme.colorScheme.primary,
             modifier = Modifier.padding(bottom = 8.dp)
         )
@@ -1008,6 +1084,15 @@ fun OwnerDeliveriesTab(viewModel: MilkViewModel) {
                                 horizontalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
                                 when (currentStatus) {
+                                    "CONFIRMED" -> {
+                                        BadgeButton(
+                                            label = "Confirmed & Locked",
+                                            icon = Icons.Default.Lock,
+                                            containerColor = Color(0xFFE3F2FD),
+                                            contentColor = Color(0xFF1565C0),
+                                            onClick = {}
+                                        )
+                                    }
                                     "DELIVERED" -> {
                                         BadgeButton(
                                             label = "Delivered",
@@ -1048,6 +1133,45 @@ fun OwnerDeliveriesTab(viewModel: MilkViewModel) {
                                                 // Resume for just this customer
                                                 viewModel.setDeliveryStatusForToday(customer.id, "DELIVERED")
                                             }
+                                        )
+                                    }
+                                }
+
+                                if (currentStatus != "CONFIRMED") {
+                                    var showConfirmDialog by remember { mutableStateOf(false) }
+                                    if (showConfirmDialog) {
+                                        AlertDialog(
+                                            onDismissRequest = { showConfirmDialog = false },
+                                            title = { Text("Confirm & Lock Record?") },
+                                            text = {
+                                                Text("Are you sure you want to finalize and lock the milk delivery of ${DecimalFormat("#.##").format(currentQty)}L for ${customer.name} on $date? Once confirmed, this record will be unchangeable, and they will receive a notification.")
+                                            },
+                                            confirmButton = {
+                                                Button(
+                                                    onClick = {
+                                                        viewModel.confirmAndLockDelivery(customer.id, date)
+                                                        showConfirmDialog = false
+                                                    }
+                                                ) {
+                                                    Text("Yes, Lock")
+                                                }
+                                            },
+                                            dismissButton = {
+                                                TextButton(onClick = { showConfirmDialog = false }) {
+                                                    Text("Cancel")
+                                                }
+                                            }
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = { showConfirmDialog = true },
+                                        modifier = Modifier.size(36.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.LockOpen,
+                                            contentDescription = "Confirm and lock daily delivery",
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(18.dp)
                                         )
                                     }
                                 }
@@ -1102,6 +1226,7 @@ fun OwnerCustomersTab(viewModel: MilkViewModel) {
     // Dialog Input states
     var nameText by remember { mutableStateOf("") }
     var phoneText by remember { mutableStateOf("") }
+    var emailText by remember { mutableStateOf("") }
     var addressText by remember { mutableStateOf("") }
     var defaultQtyText by remember { mutableStateOf("1.0") }
     var priceText by remember { mutableStateOf("60.0") }
@@ -1112,6 +1237,7 @@ fun OwnerCustomersTab(viewModel: MilkViewModel) {
                 onClick = {
                     nameText = ""
                     phoneText = ""
+                    emailText = ""
                     addressText = ""
                     defaultQtyText = "1.0"
                     priceText = "60.0"
@@ -1173,6 +1299,13 @@ fun OwnerCustomersTab(viewModel: MilkViewModel) {
                                         fontSize = 12.sp,
                                         color = MaterialTheme.colorScheme.secondary
                                     )
+                                    if (c.email.isNotEmpty()) {
+                                        Text(
+                                            text = "Email: ${c.email}",
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
                                     Text(
                                         text = "Locality: ${c.address}",
                                         fontSize = 12.sp,
@@ -1197,6 +1330,7 @@ fun OwnerCustomersTab(viewModel: MilkViewModel) {
                                         editingCustomer = c
                                         nameText = c.name
                                         phoneText = c.phone
+                                        emailText = c.email
                                         addressText = c.address
                                         defaultQtyText = c.defaultQuantity.toString()
                                         priceText = c.pricePerLiter.toString()
@@ -1237,6 +1371,13 @@ fun OwnerCustomersTab(viewModel: MilkViewModel) {
                             modifier = Modifier.fillMaxWidth()
                         )
                         OutlinedTextField(
+                            value = emailText,
+                            onValueChange = { emailText = it },
+                            label = { Text("Email (Optional for Google Link)") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        OutlinedTextField(
                             value = addressText,
                             onValueChange = { addressText = it },
                             label = { Text("Village Locality / Address") },
@@ -1264,7 +1405,7 @@ fun OwnerCustomersTab(viewModel: MilkViewModel) {
                             val qty = defaultQtyText.toDoubleOrNull() ?: 1.0
                             val prc = priceText.toDoubleOrNull() ?: 60.0
                             if (nameText.isNotBlank() && phoneText.isNotBlank()) {
-                                viewModel.addNewCustomer(nameText, phoneText, addressText, qty, prc)
+                                viewModel.addNewCustomer(nameText, phoneText, emailText, addressText, qty, prc)
                                 showAddDialog = false
                             }
                         }
@@ -1301,6 +1442,13 @@ fun OwnerCustomersTab(viewModel: MilkViewModel) {
                             modifier = Modifier.fillMaxWidth()
                         )
                         OutlinedTextField(
+                            value = emailText,
+                            onValueChange = { emailText = it },
+                            label = { Text("Email (Optional for Google Link)") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        OutlinedTextField(
                             value = addressText,
                             onValueChange = { addressText = it },
                             label = { Text("Address") },
@@ -1328,7 +1476,7 @@ fun OwnerCustomersTab(viewModel: MilkViewModel) {
                             val qty = defaultQtyText.toDoubleOrNull() ?: 1.0
                             val prc = priceText.toDoubleOrNull() ?: 60.0
                             if (nameText.isNotBlank()) {
-                                viewModel.editCustomer(editingCustomer!!.id, nameText, phoneText, addressText, qty, prc)
+                                viewModel.editCustomer(editingCustomer!!.id, nameText, phoneText, emailText, addressText, qty, prc)
                                 showEditDialog = false
                             }
                         }
@@ -1879,9 +2027,28 @@ fun CustomerDashboardScreen(viewModel: MilkViewModel) {
                     }
                 },
                 actions = {
+                    val context = LocalContext.current
                     var showSettings by remember { mutableStateOf(false) }
+                    var isSyncing by remember { mutableStateOf(false) }
+
                     if (showSettings) {
                         SettingsDialog(onDismiss = { showSettings = false })
+                    }
+                    IconButton(
+                        onClick = {
+                            isSyncing = true
+                            viewModel.syncFromFirestore {
+                                isSyncing = false
+                                Toast.makeText(context, "Synced successfully with Firestore!", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        enabled = !isSyncing
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Sync,
+                            contentDescription = "Sync with Firestore",
+                            tint = if (isSyncing) Color.Gray else MaterialTheme.colorScheme.secondary
+                        )
                     }
                     IconButton(onClick = { showSettings = true }) {
                         Icon(
@@ -1890,7 +2057,6 @@ fun CustomerDashboardScreen(viewModel: MilkViewModel) {
                             tint = MaterialTheme.colorScheme.secondary
                         )
                     }
-                    val context = LocalContext.current
                     TextButton(onClick = { AuthSession.logout(context) }) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Default.Logout, contentDescription = "Logout", modifier = Modifier.size(16.dp))
@@ -1924,8 +2090,8 @@ fun CustomerDashboardScreen(viewModel: MilkViewModel) {
                 NavigationBarItem(
                     selected = customerTab == "BILL_HISTORY",
                     onClick = { viewModel.customerTab.value = "BILL_HISTORY" },
-                    icon = { Icon(Icons.Default.Receipt, contentDescription = "Billing") },
-                    label = { Text("Bills") }
+                    icon = { Icon(Icons.Default.History, contentDescription = "Order History") },
+                    label = { Text("Order History") }
                 )
                 NavigationBarItem(
                     selected = customerTab == "ANNOUNCEMENTS",
@@ -2064,6 +2230,44 @@ fun CustomerHomeTab(viewModel: MilkViewModel, customer: CustomerEntity) {
             }
         }
 
+        // Active Delivery Lock Confirmation Notice
+        if (todayStatus == "CONFIRMED") {
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFE3F2FD))
+                ) {
+                    Row(
+                        modifier = Modifier.padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.CheckCircle,
+                            contentDescription = "Confirmed Icon",
+                            tint = Color(0xFF1565C0),
+                            modifier = Modifier.size(32.dp)
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column {
+                            Text(
+                                text = "Delivery Confirmed & Done! 🔔",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 15.sp,
+                                color = Color(0xFF0D47A1)
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "Your milk delivery of ${DecimalFormat("#.##").format(todayQty)}L for today ($date) has been verified and locked. No further modifications can be made.",
+                                fontSize = 12.sp,
+                                color = Color(0xFF1565C0)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
         // Actions: Toggle pause and send reminder
         item {
             Card(
@@ -2089,24 +2293,29 @@ fun CustomerHomeTab(viewModel: MilkViewModel, customer: CustomerEntity) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(text = "Do you need milk today?", fontWeight = FontWeight.Bold, fontSize = 14.sp)
                             Text(
-                                text = if (todayStatus == "PAUSED_BY_CUSTOMER") "You paused your supply today" else "Turn off if you have extra milk in fridge",
+                                text = when (todayStatus) {
+                                    "CONFIRMED" -> "Delivery is confirmed & locked by vendor"
+                                    "PAUSED_BY_CUSTOMER" -> "You paused your supply today"
+                                    else -> "Turn off if you have extra milk in fridge"
+                                },
                                 fontSize = 12.sp,
                                 color = MaterialTheme.colorScheme.secondary
                             )
                         }
 
                         // Switch: Checked means delivering today. Unchecked means paused by customer.
-                        // Wait, if todayStatus is "PAUSED_BY_OWNER", then customer cannot override it to True
                         Switch(
                             checked = todayStatus != "PAUSED_BY_CUSTOMER",
                             onCheckedChange = { isResuming ->
-                                if (todayStatus == "PAUSED_BY_OWNER") {
+                                if (todayStatus == "CONFIRMED") {
+                                    Toast.makeText(context, "This delivery is confirmed and locked.", Toast.LENGTH_SHORT).show()
+                                } else if (todayStatus == "PAUSED_BY_OWNER") {
                                     Toast.makeText(context, "Owner has paused deliveries globally today.", Toast.LENGTH_SHORT).show()
                                 } else {
                                     viewModel.toggleCustomerPauseToday(customer.id, !isResuming)
                                 }
                             },
-                            enabled = todayStatus != "PAUSED_BY_OWNER"
+                            enabled = todayStatus != "PAUSED_BY_OWNER" && todayStatus != "CONFIRMED"
                         )
                     }
 
@@ -2436,9 +2645,9 @@ fun CustomerBillTab(viewModel: MilkViewModel, customer: CustomerEntity) {
         // Active Month Bill details
         item {
             Text(
-                text = "Current Billing Summary",
+                text = "Order History & Billing Summary",
                 fontWeight = FontWeight.Bold,
-                fontSize = 16.sp,
+                fontSize = 18.sp,
                 color = MaterialTheme.colorScheme.primary
             )
         }
@@ -2555,9 +2764,9 @@ fun CustomerBillTab(viewModel: MilkViewModel, customer: CustomerEntity) {
         // Bill History (Past months)
         item {
             Text(
-                text = "Previous Cycles History",
+                text = "Past Order History & Cycles",
                 fontWeight = FontWeight.Bold,
-                fontSize = 15.sp,
+                fontSize = 16.sp,
                 color = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.padding(top = 8.dp)
             )
@@ -2734,6 +2943,7 @@ fun getPaymentStatusColors(status: String): Pair<Color, Color> {
 // Map delivery status code strings to beautiful background colors
 fun getDeliveryStatusBannerColor(status: String): Color {
     return when (status) {
+        "CONFIRMED" -> Color(0xFFE3F2FD) // gorgeous sky blue
         "DELIVERED" -> Color(0xFFE8F5E9) // pastoral light green
         "PAUSED_BY_CUSTOMER" -> Color(0xFFFFF3E0) // soft orange
         "PAUSED_BY_OWNER" -> Color(0xFFFFEBEE) // soft warning red
@@ -2745,6 +2955,7 @@ fun getDeliveryStatusBannerColor(status: String): Color {
 fun getDeliveryStatusMessage(status: String, qty: Double): String {
     val qStr = DecimalFormat("#.##").format(qty)
     return when (status) {
+        "CONFIRMED" -> "Confirmed & Locked: $qStr Liters Today ✅"
         "DELIVERED" -> "Delivered: $qStr Liters Today"
         "PAUSED_BY_CUSTOMER" -> "Supply Paused by You"
         "PAUSED_BY_OWNER" -> "Cancelled by Vendor Today"

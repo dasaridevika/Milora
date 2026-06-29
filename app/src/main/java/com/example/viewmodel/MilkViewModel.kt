@@ -52,12 +52,24 @@ class MilkViewModel(private val repository: MilkRepository) : ViewModel() {
         viewModelScope.launch {
             repository.seedDatabaseIfEmpty()
             
-            // Set first customer as default active logged-in customer
-            val list = repository.allCustomers.first()
-            if (list.isNotEmpty()) {
-                activeCustomerId.value = list.first().id
+            // Sync down from Firestore to load any existing remote state
+            repository.syncFromFirestore {
+                viewModelScope.launch {
+                    val list = repository.allCustomers.first()
+                    if (list.isNotEmpty()) {
+                        activeCustomerId.value = list.first().id
+                    }
+                }
             }
         }
+    }
+
+    fun syncFromFirestore(onComplete: () -> Unit = {}) {
+        repository.syncFromFirestore(onComplete)
+    }
+
+    fun fetchUserProfile(email: String, onComplete: (role: String?, ownerCode: String?, joinedOwnerCode: String?, currentCustomerId: Int?) -> Unit) {
+        repository.fetchUserProfile(email, onComplete)
     }
 
     // --- OWNER BUSINESS ACTIONS ---
@@ -71,6 +83,9 @@ class MilkViewModel(private val repository: MilkRepository) : ViewModel() {
 
             val existing = repository.getDeliveryByCustomerAndDate(customerId, date)
             if (existing != null) {
+                // Once confirmed, it is locked and unchangeable!
+                if (existing.deliveryStatus == "CONFIRMED") return@launch
+
                 // Toggle status
                 val newStatus = if (existing.deliveryStatus == "DELIVERED") "NOT_DELIVERED" else "DELIVERED"
                 val newQty = if (newStatus == "DELIVERED") customer.defaultQuantity else 0.0
@@ -104,6 +119,10 @@ class MilkViewModel(private val repository: MilkRepository) : ViewModel() {
             val customer = repository.getCustomerById(customerId) ?: return@launch
 
             val existing = repository.getDeliveryByCustomerAndDate(customerId, date)
+            
+            // Once confirmed, it is locked and unchangeable!
+            if (existing?.deliveryStatus == "CONFIRMED") return@launch
+
             val qty = if (status == "DELIVERED") customer.defaultQuantity else 0.0
             
             if (existing != null) {
@@ -130,6 +149,50 @@ class MilkViewModel(private val repository: MilkRepository) : ViewModel() {
         }
     }
 
+    // Confirm and lock delivery (unchangeable, notifies customer)
+    fun confirmAndLockDelivery(customerId: Int, dateStr: String) {
+        viewModelScope.launch {
+            val month = simulatedMonth.value
+            val customer = repository.getCustomerById(customerId) ?: return@launch
+            val existing = repository.getDeliveryByCustomerAndDate(customerId, dateStr)
+            
+            val qty = existing?.deliveredQuantity ?: customer.defaultQuantity
+            val price = existing?.pricePerLiter ?: customer.pricePerLiter
+
+            if (existing != null) {
+                repository.updateDailyDelivery(
+                    existing.copy(
+                        deliveryStatus = "CONFIRMED",
+                        deliveredQuantity = qty
+                    )
+                )
+            } else {
+                repository.insertDailyDelivery(
+                    DailyDeliveryEntity(
+                        customerId = customerId,
+                        dateStr = dateStr,
+                        deliveredQuantity = qty,
+                        deliveryStatus = "CONFIRMED",
+                        pricePerLiter = price
+                    )
+                )
+            }
+
+            // Recalculate bill
+            recalculateBill(customerId, month)
+
+            // Notify customer
+            repository.insertNotification(
+                NotificationEntity(
+                    customerId = customerId,
+                    title = "Delivery Confirmed & Finalized",
+                    message = "Vendor confirmed delivery of ${qty}L milk on $dateStr. This is now locked and unchangeable.",
+                    timestamp = System.currentTimeMillis()
+                )
+            )
+        }
+    }
+
     // Owner pause today's global delivery (Case A)
     fun toggleOwnerGlobalPause(pause: Boolean, message: String = "") {
         viewModelScope.launch {
@@ -148,6 +211,9 @@ class MilkViewModel(private val repository: MilkRepository) : ViewModel() {
             val customerList = repository.allCustomers.first()
             for (c in customerList) {
                 val existing = repository.getDeliveryByCustomerAndDate(c.id, date)
+                // If already confirmed and locked, do not modify or overwrite!
+                if (existing?.deliveryStatus == "CONFIRMED") continue
+
                 if (pause) {
                     if (existing != null) {
                         repository.updateDailyDelivery(
@@ -219,28 +285,60 @@ class MilkViewModel(private val repository: MilkRepository) : ViewModel() {
     }
 
     // Add new customer
-    fun addNewCustomer(name: String, phone: String, address: String, defaultQty: Double, price: Double) {
+    fun addNewCustomer(name: String, phone: String, email: String = "", address: String, defaultQty: Double, price: Double) {
         viewModelScope.launch {
-            val newCustomer = CustomerEntity(
-                name = name,
-                phone = phone,
-                address = address,
-                defaultQuantity = defaultQty,
-                pricePerLiter = price
-            )
-            val customerId = repository.insertCustomer(newCustomer).toInt()
+            // Uniqueness check: Ensure no duplicate customers with the same phone or email
+            val existingList = repository.allCustomers.first()
+            val existing = existingList.find {
+                it.phone == phone || (email.isNotEmpty() && it.email.equals(email, ignoreCase = true))
+            }
+
+            val customerId: Int
+            if (existing != null) {
+                // If they exist, update their info instead of inserting a duplicate
+                val updatedCustomer = existing.copy(
+                    name = name,
+                    phone = phone,
+                    email = if (email.isNotEmpty()) email else existing.email,
+                    address = address,
+                    defaultQuantity = defaultQty,
+                    pricePerLiter = price
+                )
+                repository.updateCustomer(updatedCustomer)
+                customerId = existing.id
+            } else {
+                val newCustomer = CustomerEntity(
+                    name = name,
+                    phone = phone,
+                    email = email,
+                    address = address,
+                    defaultQuantity = defaultQty,
+                    pricePerLiter = price
+                )
+                customerId = repository.insertCustomer(newCustomer).toInt()
+            }
 
             // Initialize today's delivery record
             val date = simulatedDate.value
-            repository.insertDailyDelivery(
-                DailyDeliveryEntity(
-                    customerId = customerId,
-                    dateStr = date,
-                    deliveredQuantity = defaultQty,
-                    deliveryStatus = "DELIVERED",
-                    pricePerLiter = price
+            val existingDelivery = repository.getDeliveryByCustomerAndDate(customerId, date)
+            if (existingDelivery == null) {
+                repository.insertDailyDelivery(
+                    DailyDeliveryEntity(
+                        customerId = customerId,
+                        dateStr = date,
+                        deliveredQuantity = defaultQty,
+                        deliveryStatus = "DELIVERED",
+                        pricePerLiter = price
+                    )
                 )
-            )
+            } else if (existingDelivery.deliveryStatus != "CONFIRMED") {
+                repository.updateDailyDelivery(
+                    existingDelivery.copy(
+                        deliveredQuantity = defaultQty,
+                        pricePerLiter = price
+                    )
+                )
+            }
 
             // Calculate starting bill
             recalculateBill(customerId, simulatedMonth.value)
@@ -249,20 +347,21 @@ class MilkViewModel(private val repository: MilkRepository) : ViewModel() {
             repository.insertNotification(
                 NotificationEntity(
                     customerId = customerId,
-                    title = "New Customer Registered",
-                    message = "Successfully added customer $name with default quantity ${defaultQty}L."
+                    title = if (existing != null) "Customer Profile Updated" else "New Customer Registered",
+                    message = if (existing != null) "Updated profile details for $name." else "Successfully added customer $name with default quantity ${defaultQty}L."
                 )
             )
         }
     }
 
     // Edit customer profile
-    fun editCustomer(customerId: Int, name: String, phone: String, address: String, defaultQty: Double, price: Double) {
+    fun editCustomer(customerId: Int, name: String, phone: String, email: String = "", address: String, defaultQty: Double, price: Double) {
         viewModelScope.launch {
             val existing = repository.getCustomerById(customerId) ?: return@launch
             val updated = existing.copy(
                 name = name,
                 phone = phone,
+                email = email,
                 address = address,
                 defaultQuantity = defaultQty,
                 pricePerLiter = price
@@ -381,6 +480,10 @@ class MilkViewModel(private val repository: MilkRepository) : ViewModel() {
             val customer = repository.getCustomerById(customerId) ?: return@launch
 
             val existing = repository.getDeliveryByCustomerAndDate(customerId, date)
+            
+            // Once confirmed, it is locked and unchangeable!
+            if (existing?.deliveryStatus == "CONFIRMED") return@launch
+
             val qty = if (pause) 0.0 else customer.defaultQuantity
             val status = if (pause) "PAUSED_BY_CUSTOMER" else "DELIVERED"
 

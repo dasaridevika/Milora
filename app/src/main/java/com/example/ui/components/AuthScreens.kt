@@ -327,6 +327,7 @@ fun CustomerCodeJoinScreen(viewModel: MilkViewModel, onJoined: () -> Unit) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     var enteredCode by remember { mutableStateOf("") }
+    var recoveryInput by remember { mutableStateOf("") }
     var showNewProfileForm by remember { mutableStateOf(false) }
 
     // Form states for registering a brand new customer
@@ -371,7 +372,7 @@ fun CustomerCodeJoinScreen(viewModel: MilkViewModel, onJoined: () -> Unit) {
             )
 
             Text(
-                text = "To keep your milk deliveries private, enter the unique code shared by your Dairy Owner.",
+                text = "To keep your milk deliveries private, enter the unique code shared by your Dairy Owner, or use your registered details to auto-recover your profile.",
                 fontSize = 14.sp,
                 color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
                 textAlign = TextAlign.Center,
@@ -390,9 +391,10 @@ fun CustomerCodeJoinScreen(viewModel: MilkViewModel, onJoined: () -> Unit) {
                         verticalArrangement = Arrangement.spacedBy(16.dp)
                     ) {
                         Text(
-                            text = "Enter Owner Code",
+                            text = "Option 1: Enter Owner Code",
                             fontWeight = FontWeight.Bold,
-                            fontSize = 16.sp
+                            fontSize = 16.sp,
+                            color = MaterialTheme.colorScheme.primary
                         )
 
                         OutlinedTextField(
@@ -421,6 +423,71 @@ fun CustomerCodeJoinScreen(viewModel: MilkViewModel, onJoined: () -> Unit) {
                             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
                         ) {
                             Text("Validate Code & Continue")
+                        }
+                    }
+                }
+
+                // Auto-Recovery Card
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(20.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Text(
+                            text = "Option 2: Instant Auto-Recovery",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 16.sp,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        
+                        Text(
+                            text = "If the owner has already registered your name, enter your registered Phone Number or Email below to recover your profile instantly.",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        OutlinedTextField(
+                            value = recoveryInput,
+                            onValueChange = { recoveryInput = it },
+                            placeholder = { Text("Enter Mobile or Email ID") },
+                            leadingIcon = { Icon(Icons.Default.Phone, contentDescription = "Recovery Icon") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = MaterialTheme.colorScheme.primary,
+                                focusedLabelColor = MaterialTheme.colorScheme.primary
+                            )
+                        )
+
+                        Button(
+                            onClick = {
+                                val trimmed = recoveryInput.trim()
+                                if (trimmed.isNotEmpty()) {
+                                    val matchedCustomer = allCustomers.find {
+                                        it.phone == trimmed || it.email.equals(trimmed, ignoreCase = true)
+                                    }
+                                    if (matchedCustomer != null) {
+                                        AuthSession.selectRole(context, UserRole.CUSTOMER)
+                                        AuthSession.joinOwner(context, "PM-DEV-1234", matchedCustomer.id)
+                                        viewModel.activeCustomerId.value = matchedCustomer.id
+                                        Toast.makeText(context, "Welcome! Profile '${matchedCustomer.name}' auto-recovered successfully.", Toast.LENGTH_LONG).show()
+                                        onJoined()
+                                    } else {
+                                        Toast.makeText(context, "No profile found matching '$trimmed'. Check with your owner.", Toast.LENGTH_LONG).show()
+                                    }
+                                } else {
+                                    Toast.makeText(context, "Please enter your phone or email", Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                        ) {
+                            Text("Recover Profile & Login")
                         }
                     }
                 }
@@ -564,8 +631,9 @@ fun CustomerCodeJoinScreen(viewModel: MilkViewModel, onJoined: () -> Unit) {
                                     val price = pricePerLiter.toDoubleOrNull() ?: 60.0
                                     if (name.isNotEmpty() && phone.isNotEmpty() && address.isNotEmpty()) {
                                         coroutineScope.launch {
+                                            val googleEmail = AuthSession.currentUser?.email ?: ""
                                             // Add customer entity through viewmodel
-                                            viewModel.addNewCustomer(name, phone, address, qty, price)
+                                            viewModel.addNewCustomer(name, phone, googleEmail, address, qty, price)
                                             
                                             // Retrieve the newly inserted customer's ID
                                             val list = viewModel.customers.first()
